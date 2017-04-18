@@ -1,0 +1,314 @@
+<html><head></head><body><div class="apidocDiv">
+<style>
+/*csslint
+*/
+.apidocDiv {
+    background: #fff;
+    font-family: Arial, Helvetica, sans-serif;
+}
+.apidocDiv a[href] {
+    color: #33f;
+    font-weight: bold;
+    text-decoration: none;
+}
+.apidocDiv a[href]:hover {
+    text-decoration: underline;
+}
+.apidocCodeCommentSpan {
+    background: #bbf;
+    color: #000;
+    display: block;
+}
+.apidocCodeKeywordSpan {
+    color: #d00;
+    font-weight: bold;
+}
+.apidocCodePre {
+    background: #eef;
+    border: 1px solid;
+    color: #777;
+    padding: 5px;
+    white-space: pre-wrap;
+}
+.apidocFooterDiv {
+    margin-top: 20px;
+    text-align: center;
+}
+.apidocModuleLi {
+    margin-top: 10px;
+}
+.apidocSectionDiv {
+    border-top: 1px solid;
+    margin-top: 20px;
+}
+.apidocSignatureSpan {
+    color: #777;
+    font-weight: bold;
+}
+</style>
+<h1>api documentation for
+    <a href="https://github.com/doxout/recluster#readme">recluster (v0.4.5)</a>
+</h1>
+<h4>Clustering library with support for zero-downtime reloading</h4>
+<div class="apidocSectionDiv"><a href="#apidoc.tableOfContents" id="apidoc.tableOfContents"><h1>table of contents</h1></a><ol>
+
+    <li class="apidocModuleLi"><a href="#apidoc.module.recluster">module recluster</a><ol>
+
+        <li>
+
+            <a class="apidocElementLiA" href="#apidoc.element.recluster.recluster">
+            function <span class="apidocSignatureSpan"></span>recluster
+            <span class="apidocSignatureSpan">(file, opt)</span>
+            </a>
+
+        </li>
+
+        <li>
+
+            <a class="apidocElementLiA" href="#apidoc.element.recluster.toString">
+            function <span class="apidocSignatureSpan">recluster.</span>toString
+            <span class="apidocSignatureSpan">()</span>
+            </a>
+
+        </li>
+
+        <li>
+
+            <span class="apidocSignatureSpan">object <span class="apidocSignatureSpan">recluster.</span>util</span>
+
+        </li>
+
+    </ol></li>
+
+    <li class="apidocModuleLi"><a href="#apidoc.module.recluster.util">module recluster.util</a><ol>
+
+        <li>
+
+            <a class="apidocElementLiA" href="#apidoc.element.recluster.util.removeFrom">
+            function <span class="apidocSignatureSpan">recluster.util.</span>removeFrom
+            <span class="apidocSignatureSpan">(list, item)</span>
+            </a>
+
+        </li>
+
+    </ol></li>
+
+</ol></div>
+
+<div class="apidocSectionDiv">
+<h1><a href="#apidoc.module.recluster" id="apidoc.module.recluster">module recluster</a></h1>
+
+
+    <h2>
+        <a href="#apidoc.element.recluster.recluster" id="apidoc.element.recluster.recluster">
+        function <span class="apidocSignatureSpan"></span>recluster
+        <span class="apidocSignatureSpan">(file, opt)</span>
+        </a>
+    </h2>
+    <ul>
+    <li>description and source-code<pre class="apidocCodePre">recluster = function (file, opt) {
+
+    opt = opt || {};
+    opt.workers = opt.workers || numCPUs;
+    opt.timeout = opt.timeout || (isProduction ? 3600 : 1);
+    opt.readyWhen = opt.readyWhen || 'listening';
+    opt.args = opt.args || [];
+    opt.log = opt.log || {respawns: true};
+
+    var logger     = opt.logger || console;
+    var backoff    = mkBackoff({respawn: opt.respawn, backoff: opt.backoff})
+    var respawners = mkRespawners()
+
+    var self = new EE();
+    var channel = new EE();
+
+    channel.setMaxListeners(opt.workers * 4 + 10);
+
+    var workers = [];
+
+    var activeWorkers = {length: opt.workers};
+    function deactivate(w) {
+        if (activeWorkers[w._rc_wid] == w) {
+            activeWorkers[w._rc_wid] = null;
+        }
+    }
+
+    function emit() {
+        channel.emit.apply(self, arguments);
+        self.emit.apply(channel, arguments);
+    }
+
+
+    var readyEvent = opt.readyWhen == 'started' ? 'online' :
+                     opt.readyWhen == 'listening' ? 'listening' :
+                     'message';
+
+    var readyCommand = 'ready';
+
+
+    // Fork a new worker. Give it a recluster ID and
+    // also redirect all its messages to the cluster.
+    function fork(wid) {
+        var w = cluster.fork({WORKER_ID: wid});
+        w._rc_wid = wid;
+        w._rc_isReplaced = false;
+        w.on('message', function(message) {
+            emit('message', w, message);
+        });
+        w.process.on('exit', function() {
+            utils.removeFrom(workers, w);
+            deactivate(w);
+        });
+        workers.push(w);
+        return w;
+    }
+
+    // Replace a dysfunctional worker
+    function workerReplace(worker) {
+        if (worker._rc_isReplaced) return;
+        worker._rc_isReplaced = true;
+
+        deactivate(worker);
+
+        var now  = Date.now()
+        var time = backoff(now)
+
+        if (opt.log.respawns) {
+            logger.log('[' + worker.process.pid + '] worker (' + worker._rc_wid
+                        + ':' + worker.id + ') must be replaced, respawning in', time);
+        }
+
+        var respawner = setTimeout(function() {
+            respawners.done(respawner);
+            fork(worker._rc_wid);
+        }, time);
+
+        respawners.add(respawner);
+
+    }
+
+    // Replace a worker that has closed the IPC channel
+    // or signaled that its dysfunctional. Will also
+    // terminate the worker after the specified time has
+    // passed.
+    function workerReplaceTimeoutTerminate(w) {
+        workerReplace(w);
+        killTimeout(w);
+    }
+
+
+    // Sets up a kill timeout for a worker. Closes the
+    // IPC channel immediately.
+    function killTimeout(worker) {
+        function trykillfn() {
+            try {
+                if (worker.kill) {
+                    worker.kill();
+                } else {
+                    worker.destroy();
+                }
+            } catch(e) {}
+        }
+
+        if (opt.timeout &gt; 0) {
+            var timeout = setTimeout(trykillfn, opt.timeout * 1000);
+            worker.once('exit', clearTimeout.bind(this, timeout));
+            // possible leftover worker that has no channel
+            // estabilished will throw. Ignore.
+            try {
+                worker.send({cmd: 'disconnect'});
+                worker.disconnect();
+            } catch (e) { }
+        } else {
+            process.nextTick(trykillfn);
+        }
+
+        deactivate(worker);
+    }
+
+
+    // Redirect most events
+    function workerListening(w, adr) { emit('listening', w, adr); }
+    function workerOnline(w) { emit('online', w); }
+    function workerDisconnect(w) { emit('disconnect', w); }
+    function workerEmitExit(w) { emit('exit', w); }
+
+    self.run = function() {
+        if (!cluster.isMaster) return;
+        cluster.setupMaster({exec: file});
+        cluster.settings.args = opt.args;
+        for (var i = 0; i &lt; opt.workers; i++) fork(i);
+
+        cluster.on('exit', workerEmitExit);
+        cluster.on('disconnect', workerDisconnect);
+        cluster.on('listening', workerListening);
+        cluster.on('online', workerOnline);
+
+        channel.on(readyEvent, function workerReady(w, arg) { ...</pre></li>
+    <li>example usage<pre class="apidocCodePre">n/a</pre></li>
+    </ul>
+
+
+
+    <h2>
+        <a href="#apidoc.element.recluster.toString" id="apidoc.element.recluster.toString">
+        function <span class="apidocSignatureSpan">recluster.</span>toString
+        <span class="apidocSignatureSpan">()</span>
+        </a>
+    </h2>
+    <ul>
+    <li>description and source-code<pre class="apidocCodePre">toString = function () {
+    return text;
+}</pre></li>
+    <li>example usage<pre class="apidocCodePre">n/a</pre></li>
+    </ul>
+
+
+
+
+</div>
+
+<div class="apidocSectionDiv">
+<h1><a href="#apidoc.module.recluster.util" id="apidoc.module.recluster.util">module recluster.util</a></h1>
+
+
+    <h2>
+        <a href="#apidoc.element.recluster.util.removeFrom" id="apidoc.element.recluster.util.removeFrom">
+        function <span class="apidocSignatureSpan">recluster.util.</span>removeFrom
+        <span class="apidocSignatureSpan">(list, item)</span>
+        </a>
+    </h2>
+    <ul>
+    <li>description and source-code<pre class="apidocCodePre">function removeFrom(list, item) {
+    var index = list.indexOf(item)
+    if (index &gt;= 0) list.splice(index, 1)
+}</pre></li>
+    <li>example usage<pre class="apidocCodePre">...
+    var w = cluster.fork({WORKER_ID: wid});
+    w._rc_wid = wid;
+    w._rc_isReplaced = false;
+    w.on('message', function(message) {
+        emit('message', w, message);
+    });
+    w.process.on('exit', function() {
+        utils.<span class="apidocCodeKeywordSpan">removeFrom</span>(workers, w);
+        deactivate(w);
+    });
+    workers.push(w);
+    return w;
+}
+
+// Replace a dysfunctional worker
+...</pre></li>
+    </ul>
+
+
+</div>
+
+<div class="apidocFooterDiv">
+    [ this document was created with
+    <a href="https://github.com/kaizhu256/node-utility2" target="_blank">utility2</a>
+    ]
+</div>
+</div>
+</body></html>
